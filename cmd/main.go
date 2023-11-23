@@ -9,16 +9,13 @@ import (
 	"time"
 )
 
-const maxRequestsPerSecond = 1
-
 func rateLimiterMiddleware(handler func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
-	// Разрешено 10 запросов за 10 секунд
-	limiter := internal.NewRateLimiter(time.Second*10, maxRequestsPerSecond*10)
+	// Разрешено 5 запросов за 10 секунд
+	limiter := internal.NewRateLimiter(5, time.Second*10)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := getUserIP(r)
 		if limiter.Allow(ip) {
-			limiter.AddRequest(ip)
 			handler(w, r)
 		} else {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -65,7 +62,7 @@ func main() {
 	time.Sleep(time.Second * 1)
 
 	// Тестовая отправка клиентских запросов
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
 		resp, err := http.Get("http://localhost:8080/api")
 		if err != nil {
 			panic(fmt.Sprintf("FATAL ERROR: %s", err))
@@ -77,6 +74,8 @@ func main() {
 		}
 		bodyString := string(bodyBytes)
 		fmt.Printf("response from server: %s", bodyString)
+
+		time.Sleep(time.Second)
 	}
 
 	wg.Wait()

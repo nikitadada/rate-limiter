@@ -6,53 +6,74 @@ import (
 )
 
 type RateLimiter struct {
-	mu                 sync.RWMutex
-	currentRequestsMap map[string]int
-	timeInterval       time.Duration
-	allowRequestsCount int
+	mu                   sync.Mutex
+	limitsByIp           map[string]*TokenBucket
+	defaultAllowRequests int
+	defaultInterval      time.Duration
 }
 
-func NewRateLimiter(timeInterval time.Duration, allowRequestsCount int) *RateLimiter {
-	limiter := &RateLimiter{
-		currentRequestsMap: make(map[string]int),
-		timeInterval:       timeInterval,
-		allowRequestsCount: allowRequestsCount,
+func NewRateLimiter(defaultAllowRequests int, defaultInterval time.Duration) *RateLimiter {
+	return &RateLimiter{
+		limitsByIp:           make(map[string]*TokenBucket),
+		defaultAllowRequests: defaultAllowRequests,
+		defaultInterval:      defaultInterval,
 	}
-	limiter.reset()
-
-	return limiter
 }
 
 func (r *RateLimiter) Allow(ip string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	tokenBucket, ok := r.limitsByIp[ip]
+	r.mu.Unlock()
+	// Если для переданного ip еще нет ограничителя, создадим новый с параметрами по умолчанию
+	if !ok {
+		tokenBucket = NewTokenBucket(r.defaultAllowRequests, r.defaultInterval)
+		r.mu.Lock()
+		r.limitsByIp[ip] = tokenBucket
+		r.mu.Unlock()
 
-	cur := r.currentRequestsMap[ip]
-
-	if cur >= r.allowRequestsCount {
-		return false
+		r.runBucketMonitoring(ip, tokenBucket)
 	}
 
-	return true
+	return tokenBucket.AllowTake()
 }
 
-func (r *RateLimiter) AddRequest(ip string) {
+func (r *RateLimiter) AddIp(ip string, allowRequests int, interval time.Duration) {
 	r.mu.Lock()
-	r.currentRequestsMap[ip]++
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	_, ok := r.limitsByIp[ip]
+	// Если для ip уже добавлен ограничитель, то просто ничего не делаем
+	if ok {
+		return
+	}
+
+	tokenBucket := NewTokenBucket(allowRequests, interval)
+	r.limitsByIp[ip] = tokenBucket
+	r.runBucketMonitoring(ip, tokenBucket)
 }
 
-func (r *RateLimiter) reset() {
+// Для каждого нового IP выполняется мониторинг нужно ли наполнить корзину маркерами.
+// Также если для данного ip не было активности более минуты, то мониторинг завершается
+func (r *RateLimiter) runBucketMonitoring(ip string, tb *TokenBucket) {
+	ticker := time.NewTicker(tb.InsertInterval())
 	go func() {
-		ticker := time.NewTicker(r.timeInterval)
 		for {
 			select {
 			case <-ticker.C:
-				for key := range r.currentRequestsMap {
-					r.mu.Lock()
-					r.currentRequestsMap[key] = 0
-					r.mu.Unlock()
+				if tb.IsFull() {
+					// Если после последнего обновления корзины прошло больше минуты, то удаляем корзину для
+					// данного ip и выходим из функции "наполнителя", так как данный ip адрес не активен и нет
+					// смысла держать в памяти ограничитель для него.
+					if time.Now().After(tb.LastTakeAt().Add(time.Minute)) {
+						r.mu.Lock()
+						delete(r.limitsByIp, ip)
+						r.mu.Unlock()
+
+						return
+					}
+					continue
 				}
+				// Если корзина не полная, то увеличиваем количество маркеров в корзине
+				tb.Add(tb.cap)
 			}
 		}
 	}()
