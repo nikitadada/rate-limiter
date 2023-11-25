@@ -55,6 +55,7 @@ func (r *RateLimiter) AddIp(ip string, allowRequests int, interval time.Duration
 // Также если для данного ip не было активности более минуты, то мониторинг завершается
 func (r *RateLimiter) runBucketMonitoring(ip string, tb *TokenBucket) {
 	ticker := time.NewTicker(tb.InsertInterval())
+	defer ticker.Stop()
 	go func() {
 		for {
 			select {
